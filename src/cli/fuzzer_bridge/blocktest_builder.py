@@ -8,6 +8,7 @@ from typing import Any, Dict, Optional
 from ethereum_clis import GethTransitionTool, TransitionTool
 from ethereum_test_fixtures import BlockchainFixture
 
+from .config import config
 from .converter import blockchain_test_from_fuzzer
 from .models import FuzzerOutput
 
@@ -45,8 +46,41 @@ class BlocktestBuilder:
         num_blocks: int = 1,
         block_strategy: str = "distribute",
         block_time: int = 12,
+        **kwargs: Any,
     ) -> Dict[str, Any]:
-        """Build a valid blocktest from fuzzer output."""
+        """
+        Build a valid blocktest from fuzzer output.
+
+        Routes to processor-based architecture if enabled, otherwise
+        uses legacy converter path for backward compatibility.
+        """
+        # Use new processor path if enabled
+        if config.use_version_processors:
+            from .processors.factory import ProcessorFactory
+            from .version_detector import detect_version
+
+            # Early version detection
+            version = detect_version(fuzzer_output)
+
+            # Get version-specific processor
+            processor = ProcessorFactory.create_processor(version)
+
+            # Parse fork from data
+            fuzzer_data = FuzzerOutput(**fuzzer_output)
+            fork = fuzzer_data.fork
+
+            # Process with version-aware logic
+            return processor.process(
+                fuzzer_output,
+                t8n=self.t8n,
+                fork=fork,
+                num_blocks=num_blocks,
+                block_strategy=block_strategy,
+                block_time=block_time,
+                **kwargs,
+            )
+
+        # Fallback to old path (existing code unchanged)
         # Parse and validate using Pydantic model
         fuzzer_data = FuzzerOutput(**fuzzer_output)
 
