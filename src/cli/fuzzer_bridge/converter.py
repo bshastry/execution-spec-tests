@@ -152,7 +152,7 @@ def create_sender_eoa_map(accounts: Dict[Address, FuzzerAccountInput]) -> Dict[A
     return senders
 
 
-def blockchain_test_from_fuzzer(
+def blockchain_test_from_fuzzer_v2(
     fuzzer_output: FuzzerOutput,
     fork: Fork,
     num_blocks: int = 1,
@@ -160,9 +160,9 @@ def blockchain_test_from_fuzzer(
     block_time: int = 12,
 ) -> BlockchainTest:
     """
-    Convert fuzzer output to BlockchainTest instance.
+    Convert v2.0 fuzzer output to BlockchainTest instance.
 
-    This is the main entry point for fuzzer-to-EEST conversion.
+    This is the v2.0 converter that generates blocks from a flat list of transactions.
     It orchestrates:
     1. Parsing and validation (already done by FuzzerOutput DTO)
     2. Creating EOA objects from private keys
@@ -170,7 +170,7 @@ def blockchain_test_from_fuzzer(
     4. Building blocks and test structure
 
     Args:
-        fuzzer_output: Parsed and validated fuzzer output (DTO)
+        fuzzer_output: Parsed and validated v2.0 fuzzer output (DTO)
         fork: Fork to use for the test
         num_blocks: Number of blocks to generate
         block_strategy: How to distribute transactions across blocks
@@ -306,3 +306,252 @@ def _distribute_transactions_to_blocks(
         )
 
     return blocks
+
+
+def blockchain_test_from_fuzzer(
+    fuzzer_output: FuzzerOutput,
+    fork: Fork,
+    num_blocks: int = 1,
+    block_strategy: str = "distribute",
+    block_time: int = 12,
+) -> BlockchainTest:
+    """
+    Convert fuzzer output to BlockchainTest (version-aware routing).
+
+    This function automatically routes to the correct converter based on the
+    version field in the fuzzer output:
+    - v2.0: Routes to blockchain_test_from_fuzzer_v2 (transaction distribution)
+    - v3.0: Routes to blockchain_test_from_fuzzer_v3 (explicit blocks)
+
+    Args:
+        fuzzer_output: Parsed and validated fuzzer output
+        fork: Fork to use for the test
+        num_blocks: Number of blocks to generate (v2.0 only)
+        block_strategy: Transaction distribution strategy (v2.0 only)
+        block_time: Seconds between blocks (v2.0 only)
+
+    Returns:
+        BlockchainTest instance ready for fixture generation
+
+    Raises:
+        ValueError: If fuzzer version is unsupported
+
+    """
+    import warnings
+
+    if fuzzer_output.version == "2.0":
+        return blockchain_test_from_fuzzer_v2(
+            fuzzer_output,
+            fork,
+            num_blocks=num_blocks,
+            block_strategy=block_strategy,
+            block_time=block_time,
+        )
+    elif fuzzer_output.version == "3.0":
+        # Warn if v2.0-specific parameters are provided
+        if num_blocks != 1 or block_strategy != "distribute" or block_time != 12:
+            warnings.warn(
+                "v3.0 format ignores num_blocks, block_strategy, and block_time "
+                "(blocks are explicitly defined in input)",
+                UserWarning,
+                stacklevel=2,
+            )
+        return blockchain_test_from_fuzzer_v3(fuzzer_output, fork)
+    else:
+        raise ValueError(
+            f"Unsupported fuzzer version: {fuzzer_output.version}. "
+            f"Supported versions: 2.0, 3.0"
+        )
+
+
+def _validate_withdrawal_indices(blocks: list) -> None:
+    """
+    Validate withdrawal indices are sequential across blocks.
+
+    From validation report Section 5.2: withdrawal indices must be
+    sequential spanning the entire sequence of withdrawals.
+    """
+    expected_next = 0
+    for block_num, block in enumerate(blocks):
+        if block.withdrawals is None:
+            continue
+        for w in block.withdrawals:
+            if int(w.index) != expected_next:
+                raise ValueError(
+                    f"Block {block_num}: withdrawal index {w.index} "
+                    f"expected {hex(expected_next)}"
+                )
+            expected_next += 1
+
+
+def _validate_genesis_timestamp(first_block) -> None:
+    """
+    Validate first block timestamp allows valid genesis.
+
+    From validation report Section 5.3: genesis timestamp = first_block - 12,
+    so first block must be >= 12.
+    """
+    if int(first_block.timestamp) < 12:
+        raise ValueError(
+            f"First block timestamp {first_block.timestamp} must be >= 12 "
+            "(genesis = timestamp - 12)"
+        )
+
+
+def _derive_genesis_from_first_block_v3(
+    first_block,
+    fork: Fork,
+) -> Environment:
+    """
+    Derive genesis environment from first block in v3.0 format.
+
+    Args:
+        first_block: First block from v3.0 blocks array
+        fork: Fork to use
+
+    Returns:
+        Genesis environment (block 0)
+
+    """
+    # Validate first block allows valid genesis
+    _validate_genesis_timestamp(first_block)
+
+    # Genesis is block N-1 of first block
+    genesis_timestamp = HexNumber(int(first_block.timestamp) - 12)
+
+    return Environment(
+        fee_recipient=first_block.coinbase,
+        difficulty=0,  # Post-merge
+        gas_limit=int(first_block.gas_limit),
+        number=0,  # Genesis is always block 0
+        timestamp=genesis_timestamp,
+        prev_randao=first_block.mix_hash or Hash(0),
+        base_fee_per_gas=first_block.base_fee_per_gas if first_block.base_fee_per_gas else None,
+        excess_blob_gas=first_block.excess_blob_gas if first_block.excess_blob_gas else None,
+        blob_gas_used=first_block.blob_gas_used if first_block.blob_gas_used else None,
+    ).set_fork_requirements(fork)
+
+
+def _convert_block_v3(
+    fuzzer_block,
+    sender_eoa_map: Dict[Address, EOA],
+) -> Block:
+    """
+    Convert a single v3.0 block to EEST Block.
+
+    Args:
+        fuzzer_block: Block data from v3.0 format
+        sender_eoa_map: Map of addresses to EOA for signing
+
+    Returns:
+        EEST Block instance
+
+    """
+    # Convert transactions
+    eest_txs = []
+    for fuzzer_tx in fuzzer_block.transactions:
+        if fuzzer_tx.from_ not in sender_eoa_map:
+            raise ValueError(
+                f"Sender {fuzzer_tx.from_} not found in accounts with private keys"
+            )
+
+        eest_tx = fuzzer_transaction_to_eest_transaction(
+            fuzzer_tx,
+            sender_eoa=sender_eoa_map[fuzzer_tx.from_],
+        )
+        eest_txs.append(eest_tx)
+
+    # Convert withdrawals if present
+    eest_withdrawals = None
+    if fuzzer_block.withdrawals is not None:
+        from ethereum_test_tools import Withdrawal
+
+        eest_withdrawals = [
+            Withdrawal(
+                index=w.index,
+                validator_index=w.validator_index,
+                address=w.address,
+                amount=w.amount,
+            )
+            for w in fuzzer_block.withdrawals
+        ]
+
+    # Create Block with fuzzer-specified environment
+    return Block(
+        txs=eest_txs,
+        timestamp=fuzzer_block.timestamp,
+        number=fuzzer_block.number,
+        gas_limit=fuzzer_block.gas_limit,
+        fee_recipient=fuzzer_block.coinbase,
+        base_fee_per_gas=fuzzer_block.base_fee_per_gas,
+        difficulty=fuzzer_block.difficulty,
+        prev_randao=fuzzer_block.mix_hash,
+        excess_blob_gas=fuzzer_block.excess_blob_gas,
+        blob_gas_used=fuzzer_block.blob_gas_used,
+        parent_beacon_block_root=fuzzer_block.parent_beacon_block_root,
+        withdrawals=eest_withdrawals,
+        extra_data=fuzzer_block.extra_data,
+    )
+
+
+def blockchain_test_from_fuzzer_v3(
+    fuzzer_output: FuzzerOutput,
+    fork: Fork,
+) -> BlockchainTest:
+    """
+    Convert v3.0 fuzzer output to BlockchainTest.
+
+    This is the main entry point for v3.0 conversion.
+
+    Key differences from v2.0:
+    - Blocks are explicitly specified (not generated)
+    - Per-block environments instead of single global env
+    - Withdrawals supported (EIP-4895)
+    - Per-block beacon roots (EIP-4788)
+
+    Args:
+        fuzzer_output: Parsed v3.0 fuzzer output (has 'blocks' field)
+        fork: Fork to use for the test
+
+    Returns:
+        BlockchainTest instance
+
+    Raises:
+        ValueError: If fuzzer_output is not v3.0 format or validation fails
+
+    """
+    if fuzzer_output.version != "3.0":
+        raise ValueError(f"Expected v3.0 format, got {fuzzer_output.version}")
+
+    if fuzzer_output.blocks is None or len(fuzzer_output.blocks) == 0:
+        raise ValueError("v3.0 format must have at least one block")
+
+    # Step 1: Validate withdrawal indices (Section 5.2)
+    _validate_withdrawal_indices(fuzzer_output.blocks)
+
+    # Step 2: Convert accounts (same as v2.0)
+    pre_dict: Dict[Address, Account | None] = {}
+    for addr, fuzzer_account in fuzzer_output.accounts.items():
+        pre_dict[addr] = fuzzer_account_to_eest_account(fuzzer_account)
+    pre = Alloc(pre_dict)
+
+    # Step 3: Create EOA map (same as v2.0)
+    sender_eoa_map = create_sender_eoa_map(fuzzer_output.accounts)
+
+    # Step 4: Convert each block
+    blocks = []
+    for fuzzer_block in fuzzer_output.blocks:
+        block = _convert_block_v3(fuzzer_block, sender_eoa_map)
+        blocks.append(block)
+
+    # Step 5: Derive genesis from first block (Section 5.3)
+    genesis_env = _derive_genesis_from_first_block_v3(fuzzer_output.blocks[0], fork)
+
+    # Step 6: Build BlockchainTest
+    return BlockchainTest(
+        pre=pre,
+        blocks=blocks,
+        post={},  # Post-state verification can be added later
+        genesis_environment=genesis_env,
+        chain_id=fuzzer_output.chain_id,
+    )

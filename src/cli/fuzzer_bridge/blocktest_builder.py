@@ -53,7 +53,7 @@ class BlocktestBuilder:
         # Get fork
         fork = fuzzer_data.fork
 
-        # Create BlockchainTest using converter
+        # Create BlockchainTest using converter (version-aware routing)
         test = blockchain_test_from_fuzzer(
             fuzzer_data,
             fork,
