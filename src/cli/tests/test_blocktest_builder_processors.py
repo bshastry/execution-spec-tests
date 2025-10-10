@@ -54,12 +54,13 @@ class TestBlocktestBuilderWithProcessors:
         with patch("cli.fuzzer_bridge.blocktest_builder.config") as mock_config:
             mock_config.use_version_processors = True
 
-            # Mock the processor path
-            with patch("cli.fuzzer_bridge.blocktest_builder.detect_version") as mock_detect:
+            # Mock the processor path - detect_version is in version_detector module
+            with patch("cli.fuzzer_bridge.version_detector.detect_version") as mock_detect:
                 mock_detect.return_value = "2.0"
 
+                # ProcessorFactory is in the processors.factory module
                 with patch(
-                    "cli.fuzzer_bridge.blocktest_builder.ProcessorFactory"
+                    "cli.fuzzer_bridge.processors.factory.ProcessorFactory"
                 ) as mock_factory:
                     # Setup mock processor
                     mock_processor = Mock()
