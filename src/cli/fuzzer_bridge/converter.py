@@ -1,6 +1,14 @@
 """
 Converter module for transforming fuzzer DTOs to EEST domain models.
 
+.. deprecated:: 1.0
+   The direct converter functions are deprecated in favor of the processor
+   architecture. Use `processors.v2_processor.V2Processor` for v2.0 inputs
+   and `processors.v3_processor.V3Processor` for v3.0 inputs.
+
+   The converter module will be maintained for backward compatibility but
+   is no longer the recommended approach for new code.
+
 This module performs explicit transformation from fuzzer's
 JSON-RPC format (captured in DTOs) to EEST's internal domain
 models (Transaction, Account, etc.).
@@ -11,6 +19,21 @@ Key Responsibilities:
 3. Building proper EEST domain models with all required context
 4. Preventing TestAddress pollution by setting sender
    BEFORE model_post_init
+
+Migration Guide:
+   Old approach::
+
+       from fuzzer_bridge.converter import blockchain_test_from_fuzzer
+       test = blockchain_test_from_fuzzer(fuzzer_data, fork, num_blocks=2)
+
+   New approach::
+
+       from fuzzer_bridge.processors.factory import ProcessorFactory
+       from fuzzer_bridge.version_detector import detect_version
+
+       version = detect_version(fuzzer_output)
+       processor = ProcessorFactory.create_processor(version)
+       result = processor.process(fuzzer_output, t8n=t8n, fork=fork)
 """
 
 from typing import Dict
@@ -318,6 +341,10 @@ def blockchain_test_from_fuzzer(
     """
     Convert fuzzer output to BlockchainTest (version-aware routing).
 
+    .. deprecated:: 1.0
+       Use the processor architecture instead:
+       `processors.factory.ProcessorFactory.create_processor(version)`
+
     This function automatically routes to the correct converter based on the
     version field in the fuzzer output:
     - v2.0: Routes to blockchain_test_from_fuzzer_v2 (transaction distribution)
@@ -339,6 +366,15 @@ def blockchain_test_from_fuzzer(
     """
     import warnings
 
+    # Emit deprecation warning
+    warnings.warn(
+        "blockchain_test_from_fuzzer() is deprecated. "
+        "Use processors.factory.ProcessorFactory instead. "
+        "See PROCESSOR_ARCHITECTURE.md for migration guide.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+
     if fuzzer_output.version == "2.0":
         return blockchain_test_from_fuzzer_v2(
             fuzzer_output,
@@ -359,8 +395,7 @@ def blockchain_test_from_fuzzer(
         return blockchain_test_from_fuzzer_v3(fuzzer_output, fork)
     else:
         raise ValueError(
-            f"Unsupported fuzzer version: {fuzzer_output.version}. "
-            f"Supported versions: 2.0, 3.0"
+            f"Unsupported fuzzer version: {fuzzer_output.version}. Supported versions: 2.0, 3.0"
         )
 
 
@@ -378,8 +413,7 @@ def _validate_withdrawal_indices(blocks: list) -> None:
         for w in block.withdrawals:
             if int(w.index) != expected_next:
                 raise ValueError(
-                    f"Block {block_num}: withdrawal index {w.index} "
-                    f"expected {hex(expected_next)}"
+                    f"Block {block_num}: withdrawal index {w.index} expected {hex(expected_next)}"
                 )
             expected_next += 1
 
@@ -451,9 +485,7 @@ def _convert_block_v3(
     eest_txs = []
     for fuzzer_tx in fuzzer_block.transactions:
         if fuzzer_tx.from_ not in sender_eoa_map:
-            raise ValueError(
-                f"Sender {fuzzer_tx.from_} not found in accounts with private keys"
-            )
+            raise ValueError(f"Sender {fuzzer_tx.from_} not found in accounts with private keys")
 
         eest_tx = fuzzer_transaction_to_eest_transaction(
             fuzzer_tx,
