@@ -394,6 +394,66 @@ class TestEIPFeatures:
                 assert tx.sender.key is not None
 
 
+class TestVersionValidation:
+    """
+    Test version validation baseline (Phase 0.1).
+
+    Establishes baseline tests for v2.0 format validation before
+    adding v3.0 support. These tests ensure v2.0 continues working
+    during migration.
+    """
+
+    def test_v2_version_validation(self):
+        """Validate v2.0 format is correctly parsed."""
+        fuzzer_data = load_fuzzer_vector("fuzzer_test_0.json")
+
+        # Verify test vector is v2.0
+        assert fuzzer_data["version"] == "2.0"
+
+        # Parse should succeed
+        fuzzer_output = FuzzerOutput(**fuzzer_data)
+        assert fuzzer_output.version == "2.0"
+        assert fuzzer_output.fork == Osaka
+        assert fuzzer_output.transactions is not None
+        assert fuzzer_output.env is not None
+
+    def test_future_version_rejection(self):
+        """Ensure unknown versions are rejected with clear error."""
+        fuzzer_data = load_fuzzer_vector("fuzzer_test_0.json")
+        fuzzer_data["version"] = "3.0"  # Not yet supported
+
+        with pytest.raises(ValidationError) as exc_info:
+            FuzzerOutput(**fuzzer_data)
+
+        # Verify error message mentions version pattern
+        assert "version" in str(exc_info.value).lower()
+
+    def test_invalid_version_format(self):
+        """Test malformed version strings are rejected."""
+        fuzzer_data = load_fuzzer_vector("fuzzer_test_0.json")
+
+        invalid_versions = ["2", "2.0.0", "v2.0", "1.0", ""]
+
+        for invalid_version in invalid_versions:
+            fuzzer_data["version"] = invalid_version
+            with pytest.raises(ValidationError):
+                FuzzerOutput(**fuzzer_data)
+
+    def test_all_v2_test_vectors_pass(self):
+        """Validate all existing v2.0 test vectors parse correctly."""
+        fuzzer_data = load_fuzzer_vector("fuzzer_test_0.json")
+
+        # This should not raise any exceptions
+        fuzzer_output = FuzzerOutput(**fuzzer_data)
+
+        # Verify complete v2.0 structure
+        assert fuzzer_output.version == "2.0"
+        assert fuzzer_output.transactions is not None
+        assert fuzzer_output.env is not None
+        assert fuzzer_output.accounts is not None
+        assert len(fuzzer_output.transactions) > 0
+
+
 class TestErrorHandling:
     """Test error handling and validation."""
 
