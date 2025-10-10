@@ -134,6 +134,37 @@ def process_single_file_worker(
     builder = BlocktestBuilder(t8n)
 
     try:
+        # Early version detection (if processors enabled)
+        from .config import config
+        from .version_detector import detect_from_file
+
+        if config.use_version_processors:
+            version = detect_from_file(json_file_path)
+
+            # Note: Workers don't output version messages to avoid cluttering parallel output
+            # Version detection is still performed for routing purposes
+
+            # Warn on mismatched params (to stderr for visibility even in parallel mode)
+            if version == "3.0":
+                # Check if v2 parameters are provided
+                v2_params = []
+                if num_blocks != 1:  # Default is 1
+                    v2_params.append("num_blocks")
+                if block_strategy != "distribute":  # Default is "distribute"
+                    v2_params.append("block_strategy")
+                if random_blocks:  # Default is False
+                    v2_params.append("random_blocks")
+
+                if v2_params:
+                    # Log warning for this specific file
+                    import sys
+
+                    print(
+                        f"Warning [{json_file_path.name}]: v3.0 format ignores v2 parameters: {', '.join(v2_params)}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+
         with open(json_file_path) as f:
             fuzzer_data = json.load(f)
 
@@ -194,6 +225,33 @@ def process_file_batch(
 
     for json_file_path, rel_path in file_batch:
         try:
+            # Early version detection (if processors enabled)
+            from .config import config
+            from .version_detector import detect_from_file
+
+            if config.use_version_processors:
+                version = detect_from_file(json_file_path)
+
+                # Warn on mismatched params
+                if version == "3.0":
+                    # Check if v2 parameters are provided
+                    v2_params_batch = []
+                    if num_blocks != 1:
+                        v2_params_batch.append("num_blocks")
+                    if block_strategy != "distribute":
+                        v2_params_batch.append("block_strategy")
+                    if random_blocks:
+                        v2_params_batch.append("random_blocks")
+
+                    if v2_params_batch:
+                        import sys
+
+                        print(
+                            f"Warning [{json_file_path.name}]: v3.0 format ignores v2 parameters: {', '.join(v2_params_batch)}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+
             with open(json_file_path) as f:
                 fuzzer_data = json.load(f)
 
