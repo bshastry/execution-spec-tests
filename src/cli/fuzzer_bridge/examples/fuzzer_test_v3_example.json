@@ -1,0 +1,74 @@
+{
+  "version": "3.0",
+  "fork": "Prague",
+  "chainId": "0x1",
+  "accounts": {
+    "0xa94f5374fce5edbc8e2a8697c15331677e6ebf0b": {
+      "balance": "0x1000000000000000000",
+      "nonce": "0x0",
+      "code": "0x",
+      "storage": {},
+      "privateKey": "0x45a915e4d060149eb4365960e6a7a45f334393093061116b197e3240065ff2d8"
+    },
+    "0x3000000000000000000000000000000000000001": {
+      "balance": "0x0",
+      "nonce": "0x0",
+      "code": "0x",
+      "storage": {}
+    }
+  },
+  "blocks": [
+    {
+      "number": "0x1",
+      "timestamp": "0x3e8",
+      "gasLimit": "0x1c9c380",
+      "coinbase": "0x2adc25665018aa1fe0e6bc666dac8fc2697ff9ba",
+      "baseFeePerGas": "0x7",
+      "difficulty": "0x0",
+      "mixHash": "0x0000000000000000000000000000000000000000000000000000000000000001",
+      "transactions": [
+        {
+          "from": "0xa94f5374fce5edbc8e2a8697c15331677e6ebf0b",
+          "to": "0x3000000000000000000000000000000000000001",
+          "gas": "0x5208",
+          "maxFeePerGas": "0x64",
+          "maxPriorityFeePerGas": "0xa",
+          "nonce": "0x0",
+          "value": "0x64",
+          "data": "0x"
+        }
+      ]
+    },
+    {
+      "number": "0x2",
+      "timestamp": "0x3f4",
+      "gasLimit": "0x1c9c380",
+      "coinbase": "0x2adc25665018aa1fe0e6bc666dac8fc2697ff9ba",
+      "baseFeePerGas": "0x7",
+      "difficulty": "0x0",
+      "mixHash": "0x0000000000000000000000000000000000000000000000000000000000000002",
+      "transactions": [
+        {
+          "from": "0xa94f5374fce5edbc8e2a8697c15331677e6ebf0b",
+          "to": "0x3000000000000000000000000000000000000001",
+          "gas": "0x5208",
+          "maxFeePerGas": "0x64",
+          "maxPriorityFeePerGas": "0xa",
+          "nonce": "0x1",
+          "value": "0x32",
+          "data": "0x"
+        }
+      ]
+    },
+    {
+      "number": "0x3",
+      "timestamp": "0x400",
+      "gasLimit": "0x1c9c380",
+      "coinbase": "0x2adc25665018aa1fe0e6bc666dac8fc2697ff9ba",
+      "baseFeePerGas": "0x7",
+      "difficulty": "0x0",
+      "mixHash": "0x0000000000000000000000000000000000000000000000000000000000000003",
+      "transactions": []
+    }
+  ]
+}
