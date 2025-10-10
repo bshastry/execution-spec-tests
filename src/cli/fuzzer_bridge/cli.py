@@ -49,6 +49,33 @@ def process_single_file(
     random_blocks: bool = False,
 ) -> Dict[str, Any]:
     """Process a single fuzzer output file."""
+    # Early version detection (if processors enabled)
+    from .config import config
+    from .version_detector import detect_from_file
+
+    if config.use_version_processors:
+        version = detect_from_file(input_file)
+
+        if not quiet:
+            click.echo(f"Detected version: {version}", err=True)
+
+        # Warn on mismatched params
+        if version == "3.0":
+            # Check if v2 parameters are provided
+            v2_params = []
+            if num_blocks != 1:  # Default is 1
+                v2_params.append("num_blocks")
+            if block_strategy != "distribute":  # Default is "distribute"
+                v2_params.append("block_strategy")
+            if random_blocks:  # Default is False
+                v2_params.append("random_blocks")
+
+            if v2_params and not quiet:
+                click.echo(
+                    f"Warning: v3.0 format ignores v2 parameters: {', '.join(v2_params)}",
+                    err=True,
+                )
+
     with open(input_file) as f:
         fuzzer_data = json.load(f)
 
