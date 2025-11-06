@@ -39,6 +39,7 @@ Migration Guide:
 from typing import Dict
 
 from ethereum_test_base_types import Address, Hash, HexNumber
+from ethereum_test_exceptions import BlockException, TransactionException
 from ethereum_test_forks import Fork
 from ethereum_test_specs import BlockchainTest
 from ethereum_test_tools import Account, AuthorizationTuple, Block, Transaction
@@ -50,7 +51,67 @@ from .models import (
     FuzzerAuthorizationInput,
     FuzzerOutput,
     FuzzerTransactionInput,
+    InvalidBlockInput,
+    ValidBlockInput,
 )
+
+
+def parse_exception_string(exception_str: str) -> BlockException | TransactionException:
+    """
+    Parse exception string from fuzzer format to EEST exception type.
+
+    Args:
+        exception_str: Exception string in fuzzer format, e.g.:
+                      - "BlockException.INVALID_STATE_ROOT"
+                      - "TransactionException.NONCE_TOO_LOW"
+                      - "INVALID_TIMESTAMP" (legacy format)
+
+    Returns:
+        BlockException or TransactionException instance
+
+    Raises:
+        ValueError: If exception string cannot be parsed
+
+    """
+    # Split on dot to check if it has prefix
+    parts = exception_str.split(".")
+
+    if len(parts) == 2:
+        # Format: "BlockException.VALUE" or "TransactionException.VALUE"
+        prefix, value = parts
+
+        if prefix == "BlockException":
+            try:
+                return BlockException[value]
+            except KeyError:
+                raise ValueError(f"Unknown BlockException value: {value}")
+        elif prefix == "TransactionException":
+            try:
+                return TransactionException[value]
+            except KeyError:
+                raise ValueError(f"Unknown TransactionException value: {value}")
+        else:
+            raise ValueError(f"Unknown exception prefix: {prefix}")
+
+    elif len(parts) == 1:
+        # Legacy format: "VALUE" - try both exception types
+        value = parts[0]
+
+        # Try BlockException first
+        try:
+            return BlockException[value]
+        except KeyError:
+            pass
+
+        # Try TransactionException
+        try:
+            return TransactionException[value]
+        except KeyError:
+            raise ValueError(
+                f"Unknown exception value '{value}' (not found in BlockException or TransactionException)"
+            )
+    else:
+        raise ValueError(f"Invalid exception format: {exception_str}")
 
 
 def fuzzer_account_to_eest_account(fuzzer_account: FuzzerAccountInput) -> Account:
@@ -405,9 +466,16 @@ def _validate_withdrawal_indices(blocks: list) -> None:
 
     From validation report Section 5.2: withdrawal indices must be
     sequential spanning the entire sequence of withdrawals.
+
+    Note: Invalid blocks are skipped as they don't have withdrawals field.
     """
     expected_next = 0
     for block_num, block in enumerate(blocks):
+        # Skip invalid blocks (they don't have withdrawals)
+        if isinstance(block, InvalidBlockInput):
+            continue
+
+        # Only ValidBlockInput has withdrawals field
         if block.withdrawals is None:
             continue
         for w in block.withdrawals:
@@ -424,7 +492,13 @@ def _validate_genesis_timestamp(first_block) -> None:
 
     From validation report Section 5.3: genesis timestamp = first_block - 12,
     so first block must be >= 12.
+
+    Note: Invalid blocks don't have timestamp field, so this check is skipped.
     """
+    # Skip validation for invalid blocks (they don't have timestamp)
+    if isinstance(first_block, InvalidBlockInput):
+        return
+
     if int(first_block.timestamp) < 12:
         raise ValueError(
             f"First block timestamp {first_block.timestamp} must be >= 12 "
@@ -446,7 +520,20 @@ def _derive_genesis_from_first_block_v3(
     Returns:
         Genesis environment (block 0)
 
+    Note:
+        If first block is invalid, returns default genesis environment.
     """
+    # If first block is invalid, use default genesis
+    if isinstance(first_block, InvalidBlockInput):
+        return Environment(
+            fee_recipient=Address("0x2adc25665018aa1fe0e6bc666dac8fc2697ff9ba"),
+            difficulty=0,
+            gas_limit=30_000_000,
+            number=0,
+            timestamp=0,
+            prev_randao=Hash(0),
+        ).set_fork_requirements(fork)
+
     # Validate first block allows valid genesis
     _validate_genesis_timestamp(first_block)
 
@@ -467,20 +554,38 @@ def _derive_genesis_from_first_block_v3(
 
 
 def _convert_block_v3(
-    fuzzer_block,
+    fuzzer_block: ValidBlockInput | InvalidBlockInput,
     sender_eoa_map: Dict[Address, EOA],
 ) -> Block:
     """
     Convert a single v3.0 block to EEST Block.
 
+    Handles both valid and invalid blocks:
+    - ValidBlockInput: Full conversion with transactions and environment
+    - InvalidBlockInput: Minimal conversion with just exception field
+
     Args:
-        fuzzer_block: Block data from v3.0 format
+        fuzzer_block: Block data from v3.0 format (valid or invalid)
         sender_eoa_map: Map of addresses to EOA for signing
 
     Returns:
         EEST Block instance
 
     """
+    # Check if this is an invalid block
+    if isinstance(fuzzer_block, InvalidBlockInput):
+        # Invalid block: minimal conversion with exception
+        exception = parse_exception_string(fuzzer_block.expect_exception)
+
+        return Block(
+            number=fuzzer_block.number,
+            exception=exception,
+            # Note: RLP field is not supported in Block type - it's added during fixture generation
+        )
+
+    # Valid block: full conversion (existing logic)
+    assert isinstance(fuzzer_block, ValidBlockInput), f"Unexpected block type: {type(fuzzer_block)}"
+
     # Convert transactions
     eest_txs = []
     for fuzzer_tx in fuzzer_block.transactions:

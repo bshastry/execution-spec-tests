@@ -12,7 +12,7 @@ Design Principle:
 - Converter (converter.py): Explicit transformation between the two
 """
 
-from typing import Dict, List
+from typing import Annotated, Dict, List, Union
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -119,16 +119,15 @@ class WithdrawalInput(BaseModel):
         populate_by_name = True
 
 
-class FuzzerBlockInput(BaseModel):
+class ValidBlockInput(BaseModel):
     """
-    Block data from fuzzer output v3.0.
+    Valid block data from fuzzer output v3.0.
 
-    Represents a single block with its transactions and environment.
-    Not used in v2.0 - added for v3.0 support.
+    Represents a single valid block with complete structure including
+    transactions and environment that can be executed by the client.
 
-    In v3.0, the fuzzer specifies complete block structure including
-    per-block environment parameters. This gives the fuzzer full control
-    over block boundaries and block-specific parameters.
+    This is used for blocks expected to be accepted by the client.
+    For blocks expected to be rejected, use InvalidBlockInput.
     """
 
     transactions: List[FuzzerTransactionInput]
@@ -168,6 +167,62 @@ class FuzzerBlockInput(BaseModel):
         populate_by_name = True
 
 
+class InvalidBlockInput(BaseModel):
+    """
+    Invalid block data from fuzzer output v3.0.
+
+    Represents a block that violates consensus rules and is expected
+    to be rejected by the client. Contains minimal structure:
+    - number: Block number for ordering
+    - expectException: Expected exception when client rejects block
+    - rlp: Optional RLP-encoded block for direct client testing
+
+    Invalid blocks test the "rejection path" - ensuring clients
+    correctly reject blocks that violate consensus rules.
+    """
+
+    # Block number (REQUIRED for ordering)
+    number: HexNumber = Field(..., alias="number")
+
+    # Expected exception (REQUIRED - marks block as invalid)
+    expect_exception: str = Field(
+        ...,
+        alias="expectException",
+        description="Expected exception when client rejects block",
+    )
+
+    # Optional RLP-encoded block
+    rlp: Bytes | None = Field(
+        None,
+        alias="rlp",
+        description="RLP-encoded block for direct client testing",
+    )
+
+    class Config:
+        """Pydantic configuration."""
+
+        populate_by_name = True
+        extra = "forbid"  # Reject extra fields like transactions, timestamp
+
+    @model_validator(mode="after")
+    def validate_exception_format(self) -> "InvalidBlockInput":
+        """Validate expectException is not empty."""
+        if not self.expect_exception:
+            raise ValueError("expectException cannot be empty")
+        return self
+
+
+# Discriminated union for block input (valid or invalid)
+BlockInput = Annotated[
+    Union[ValidBlockInput, InvalidBlockInput],
+    Field(discriminator=None),  # Auto-discriminate based on fields
+]
+
+
+# Backward compatibility alias
+FuzzerBlockInput = ValidBlockInput
+
+
 class FuzzerOutput(CamelModel):
     """
     Main fuzzer output format (supports v2.0 and v3.0).
@@ -195,7 +250,7 @@ class FuzzerOutput(CamelModel):
     parent_beacon_block_root: Hash | None = None
 
     # v3.0 fields (not supported in v2.0)
-    blocks: List[FuzzerBlockInput] | None = None
+    blocks: List[BlockInput] | None = None
 
     @model_validator(mode="after")
     def validate_version_fields(self) -> "FuzzerOutput":

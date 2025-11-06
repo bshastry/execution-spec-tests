@@ -11,7 +11,13 @@ from ethereum_test_base_types import Address, HexNumber
 from ethereum_test_forks import Prague
 
 from ..fuzzer_bridge.config import FuzzerBridgeConfig
-from ..fuzzer_bridge.models import FuzzerBlockInput, FuzzerOutput, WithdrawalInput
+from ..fuzzer_bridge.models import (
+    FuzzerBlockInput,
+    FuzzerOutput,
+    InvalidBlockInput,
+    ValidBlockInput,
+    WithdrawalInput,
+)
 
 
 def load_v3_vector(filename: str) -> Dict[str, Any]:
@@ -326,3 +332,351 @@ class TestV3Validations:
 
         # Last block is empty
         assert len(blockchain_test.blocks[2].txs) == 0
+
+
+class TestInvalidBlockSupport:
+    """Test invalid block support in v3.0 format."""
+
+    def test_invalid_block_minimal(self):
+        """Test InvalidBlockInput with minimal required fields."""
+        block_data = {
+            "number": "0x1",
+            "expectException": "BlockException.INVALID_STATE_ROOT",
+        }
+
+        block = InvalidBlockInput(**block_data)
+
+        assert block.number == 1
+        assert block.expect_exception == "BlockException.INVALID_STATE_ROOT"
+        assert block.rlp is None
+
+    def test_invalid_block_with_rlp(self):
+        """Test InvalidBlockInput with optional RLP field."""
+        block_data = {
+            "number": "0x2",
+            "expectException": "BlockException.INVALID_TIMESTAMP",
+            "rlp": "0xf90260f901f9a0",
+        }
+
+        block = InvalidBlockInput(**block_data)
+
+        assert block.number == 2
+        assert block.expect_exception == "BlockException.INVALID_TIMESTAMP"
+        assert block.rlp is not None
+
+    def test_invalid_block_rejects_transactions(self):
+        """Test that InvalidBlockInput cannot have transactions field."""
+        block_data = {
+            "number": "0x1",
+            "expectException": "BlockException.INVALID_STATE_ROOT",
+            "transactions": [],  # Should be rejected
+        }
+
+        # Pydantic should reject this as extra field
+        with pytest.raises(ValidationError):
+            InvalidBlockInput(**block_data)
+
+    def test_invalid_block_rejects_timestamp(self):
+        """Test that InvalidBlockInput cannot have timestamp field."""
+        block_data = {
+            "number": "0x1",
+            "expectException": "BlockException.INVALID_STATE_ROOT",
+            "timestamp": "0x3e8",  # Should be rejected
+        }
+
+        # Pydantic should reject this as extra field
+        with pytest.raises(ValidationError):
+            InvalidBlockInput(**block_data)
+
+    def test_invalid_block_empty_exception(self):
+        """Test that expectException cannot be empty."""
+        block_data = {
+            "number": "0x1",
+            "expectException": "",
+        }
+
+        with pytest.raises(ValidationError, match="expectException cannot be empty"):
+            InvalidBlockInput(**block_data)
+
+    def test_invalid_block_missing_exception(self):
+        """Test that expectException is required."""
+        block_data = {
+            "number": "0x1",
+            # Missing expectException
+        }
+
+        with pytest.raises(ValidationError, match="Field required"):
+            InvalidBlockInput(**block_data)
+
+    def test_valid_block_backward_compatibility(self):
+        """Test that ValidBlockInput works like old FuzzerBlockInput."""
+        block_data = {
+            "number": "0x1",
+            "timestamp": "0x3e8",
+            "gasLimit": "0x1c9c380",
+            "coinbase": "0x2000000000000000000000000000000000000001",
+            "transactions": [],
+        }
+
+        # Both should work
+        valid_block = ValidBlockInput(**block_data)
+        fuzzer_block = FuzzerBlockInput(**block_data)
+
+        assert valid_block.number == fuzzer_block.number
+        assert valid_block.timestamp == fuzzer_block.timestamp
+
+    def test_fuzzer_output_with_invalid_block(self):
+        """Test FuzzerOutput accepts invalid block."""
+        fuzzer_data = {
+            "version": "3.0",
+            "fork": "Prague",
+            "chainId": "0x1",
+            "accounts": {
+                "0xa94f5374fce5edbc8e2a8697c15331677e6ebf0b": {
+                    "balance": "0xde0b6b3a7640000",
+                    "nonce": "0x0",
+                }
+            },
+            "blocks": [
+                {
+                    "number": "0x1",
+                    "expectException": "BlockException.INVALID_TIMESTAMP",
+                }
+            ],
+        }
+
+        fuzzer_output = FuzzerOutput(**fuzzer_data)
+
+        assert len(fuzzer_output.blocks) == 1
+        assert isinstance(fuzzer_output.blocks[0], InvalidBlockInput)
+        assert fuzzer_output.blocks[0].expect_exception == "BlockException.INVALID_TIMESTAMP"
+
+    def test_fuzzer_output_mixed_blocks(self):
+        """Test FuzzerOutput with mixed valid and invalid blocks."""
+        fuzzer_data = {
+            "version": "3.0",
+            "fork": "Prague",
+            "chainId": "0x1",
+            "accounts": {
+                "0xa94f5374fce5edbc8e2a8697c15331677e6ebf0b": {
+                    "balance": "0xde0b6b3a7640000",
+                    "nonce": "0x0",
+                }
+            },
+            "blocks": [
+                {
+                    "number": "0x1",
+                    "timestamp": "0x3e8",
+                    "gasLimit": "0x1c9c380",
+                    "coinbase": "0x2000000000000000000000000000000000000001",
+                    "transactions": [],
+                },
+                {
+                    "number": "0x2",
+                    "expectException": "BlockException.INVALID_BLOCK_TIMESTAMP_OLDER_THAN_PARENT",
+                },
+                {
+                    "number": "0x3",
+                    "timestamp": "0x7d0",
+                    "gasLimit": "0x1c9c380",
+                    "coinbase": "0x2000000000000000000000000000000000000001",
+                    "transactions": [],
+                },
+            ],
+        }
+
+        fuzzer_output = FuzzerOutput(**fuzzer_data)
+
+        assert len(fuzzer_output.blocks) == 3
+        assert isinstance(fuzzer_output.blocks[0], ValidBlockInput)
+        assert isinstance(fuzzer_output.blocks[1], InvalidBlockInput)
+        assert isinstance(fuzzer_output.blocks[2], ValidBlockInput)
+
+    def test_fuzzer_output_all_invalid_blocks(self):
+        """Test FuzzerOutput with only invalid blocks."""
+        fuzzer_data = {
+            "version": "3.0",
+            "fork": "Prague",
+            "chainId": "0x1",
+            "accounts": {},
+            "blocks": [
+                {"number": "0x1", "expectException": "BlockException.INVALID_TIMESTAMP"},
+                {"number": "0x2", "expectException": "BlockException.INVALID_GAS_LIMIT"},
+                {"number": "0x3", "expectException": "TransactionException.NONCE_TOO_LOW"},
+            ],
+        }
+
+        fuzzer_output = FuzzerOutput(**fuzzer_data)
+
+        assert len(fuzzer_output.blocks) == 3
+        assert all(isinstance(b, InvalidBlockInput) for b in fuzzer_output.blocks)
+
+    def test_exception_format_variations(self):
+        """Test various valid exception format variations."""
+        valid_exceptions = [
+            "BlockException.INVALID_STATE_ROOT",
+            "TransactionException.NONCE_TOO_LOW",
+            "INVALID_TIMESTAMP",  # Legacy format
+            "BlockException.INVALID_GAS_USED",
+            "BlockException.INVALID_BASE_FEE",
+        ]
+
+        for exception in valid_exceptions:
+            block_data = {
+                "number": "0x1",
+                "expectException": exception,
+            }
+            block = InvalidBlockInput(**block_data)
+            assert block.expect_exception == exception
+
+
+class TestInvalidBlockConverter:
+    """Test converter handles invalid blocks correctly."""
+
+    def test_convert_invalid_block_simple(self):
+        """Test converting simple invalid block."""
+        from ..fuzzer_bridge.converter import blockchain_test_from_fuzzer_v3
+
+        fuzzer_data = {
+            "version": "3.0",
+            "fork": "Prague",
+            "chainId": "0x1",
+            "accounts": {},
+            "blocks": [
+                {
+                    "number": "0x1",
+                    "expectException": "BlockException.INVALID_STATE_ROOT",
+                }
+            ],
+        }
+
+        fuzzer_output = FuzzerOutput(**fuzzer_data)
+        blockchain_test = blockchain_test_from_fuzzer_v3(fuzzer_output, fork=Prague)
+
+        assert len(blockchain_test.blocks) == 1
+        assert blockchain_test.blocks[0].exception is not None
+        # Check exception was parsed correctly
+        from ethereum_test_exceptions import BlockException
+
+        assert blockchain_test.blocks[0].exception == BlockException.INVALID_STATE_ROOT
+
+    def test_convert_mixed_valid_invalid_blocks(self):
+        """Test converting mix of valid and invalid blocks."""
+        from ..fuzzer_bridge.converter import blockchain_test_from_fuzzer_v3
+
+        fuzzer_data = {
+            "version": "3.0",
+            "fork": "Prague",
+            "chainId": "0x1",
+            "accounts": {
+                "0xa94f5374fce5edbc8e2a8697c15331677e6ebf0b": {
+                    "balance": "0xde0b6b3a7640000",
+                    "nonce": "0x0",
+                    "privateKey": "0x45a915e4d060149eb4365960e6a7a45f334393093061116b197e3240065ff2d8",
+                }
+            },
+            "blocks": [
+                {
+                    "number": "0x1",
+                    "timestamp": "0x3e8",
+                    "gasLimit": "0x1c9c380",
+                    "coinbase": "0x2000000000000000000000000000000000000001",
+                    "transactions": [],
+                },
+                {
+                    "number": "0x2",
+                    "expectException": "BlockException.INVALID_BLOCK_TIMESTAMP_OLDER_THAN_PARENT",
+                },
+                {
+                    "number": "0x3",
+                    "timestamp": "0x7d0",
+                    "gasLimit": "0x1c9c380",
+                    "coinbase": "0x2000000000000000000000000000000000000001",
+                    "transactions": [],
+                },
+            ],
+        }
+
+        fuzzer_output = FuzzerOutput(**fuzzer_data)
+        blockchain_test = blockchain_test_from_fuzzer_v3(fuzzer_output, fork=Prague)
+
+        assert len(blockchain_test.blocks) == 3
+        # Block 0: valid
+        assert blockchain_test.blocks[0].exception is None
+        assert len(blockchain_test.blocks[0].txs) == 0
+        # Block 1: invalid
+        from ethereum_test_exceptions import BlockException
+
+        assert blockchain_test.blocks[1].exception == BlockException.INVALID_BLOCK_TIMESTAMP_OLDER_THAN_PARENT
+        # Block 2: valid
+        assert blockchain_test.blocks[2].exception is None
+
+    def test_convert_transaction_exception(self):
+        """Test converting block with TransactionException."""
+        from ..fuzzer_bridge.converter import blockchain_test_from_fuzzer_v3
+
+        fuzzer_data = {
+            "version": "3.0",
+            "fork": "Prague",
+            "chainId": "0x1",
+            "accounts": {},
+            "blocks": [
+                {
+                    "number": "0x1",
+                    "expectException": "TransactionException.NONCE_MISMATCH_TOO_LOW",
+                }
+            ],
+        }
+
+        fuzzer_output = FuzzerOutput(**fuzzer_data)
+        blockchain_test = blockchain_test_from_fuzzer_v3(fuzzer_output, fork=Prague)
+
+        from ethereum_test_exceptions import TransactionException
+
+        assert blockchain_test.blocks[0].exception == TransactionException.NONCE_MISMATCH_TOO_LOW
+
+    def test_convert_legacy_exception_format(self):
+        """Test converting block with legacy exception format (no prefix)."""
+        from ..fuzzer_bridge.converter import blockchain_test_from_fuzzer_v3
+
+        fuzzer_data = {
+            "version": "3.0",
+            "fork": "Prague",
+            "chainId": "0x1",
+            "accounts": {},
+            "blocks": [
+                {
+                    "number": "0x1",
+                    "expectException": "INVALID_STATE_ROOT",  # Legacy format (no prefix)
+                }
+            ],
+        }
+
+        fuzzer_output = FuzzerOutput(**fuzzer_data)
+        blockchain_test = blockchain_test_from_fuzzer_v3(fuzzer_output, fork=Prague)
+
+        from ethereum_test_exceptions import BlockException
+
+        assert blockchain_test.blocks[0].exception == BlockException.INVALID_STATE_ROOT
+
+    def test_convert_invalid_exception_string(self):
+        """Test that invalid exception strings raise error."""
+        from ..fuzzer_bridge.converter import blockchain_test_from_fuzzer_v3
+
+        fuzzer_data = {
+            "version": "3.0",
+            "fork": "Prague",
+            "chainId": "0x1",
+            "accounts": {},
+            "blocks": [
+                {
+                    "number": "0x1",
+                    "expectException": "UnknownException.INVALID_VALUE",
+                }
+            ],
+        }
+
+        fuzzer_output = FuzzerOutput(**fuzzer_data)
+
+        with pytest.raises(ValueError, match="Unknown exception prefix"):
+            blockchain_test_from_fuzzer_v3(fuzzer_output, fork=Prague)
