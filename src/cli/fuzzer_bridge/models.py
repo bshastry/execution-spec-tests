@@ -14,12 +14,11 @@ Design Principle:
 
 from typing import Annotated, Dict, List, Union
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, BeforeValidator, Field, model_validator
 
 from ethereum_test_base_types import AccessList, Address, Bytes, CamelModel, Hash, HexNumber
 from ethereum_test_forks import Fork
 from ethereum_test_types import Environment
-from ethereum_test_types import Withdrawal as EESTWithdrawal
 
 
 class FuzzerAccountInput(BaseModel):
@@ -167,6 +166,61 @@ class ValidBlockInput(BaseModel):
         populate_by_name = True
 
 
+def normalize_goevmlab_exception(value: str) -> str:
+    """
+    Normalize goevmlab exception names to EEST qualified format.
+
+    Goevmlab uses CamelCase exception names (e.g., "InvalidGasLimit") while
+    EEST uses fully qualified UPPER_SNAKE_CASE format (e.g.,
+    "BlockException.INVALID_GASLIMIT").
+
+    This validator transforms goevmlab format to EEST format at the DTO
+    boundary, allowing the converter to work with pre-normalized strings.
+
+    Examples:
+        >>> normalize_goevmlab_exception("InvalidGasLimit")
+        "BlockException.INVALID_GASLIMIT"
+        >>> normalize_goevmlab_exception("NonceTooLow")
+        "TransactionException.NONCE_MISMATCH_TOO_LOW"
+        >>> normalize_goevmlab_exception("BlockException.INVALID_STATE_ROOT")
+        "BlockException.INVALID_STATE_ROOT"  # Pass through already normalized
+
+    Args:
+        value: Exception name from goevmlab (CamelCase) or EEST (qualified)
+
+    Returns:
+        Fully qualified EEST exception name
+
+    """
+    if not isinstance(value, str):
+        return value
+
+    # Already normalized (has prefix and uppercase) - pass through
+    if "." in value and value.split(".")[1].isupper():
+        return value
+
+    # Explicit mapping for known goevmlab exception names
+    # Based on goevmlab output analysis from blocktest-json logs
+    goevmlab_to_eest = {
+        # Block exceptions (8 cases)
+        "InvalidGasLimit": "BlockException.INVALID_GASLIMIT",
+        "InvalidBaseFee": "BlockException.INVALID_BASEFEE_PER_GAS",
+        "InvalidBlobGas": "BlockException.INCORRECT_BLOB_GAS_USED",
+        "InvalidBlockNumber": "BlockException.INVALID_BLOCK_NUMBER",
+        "InvalidExcessBlobGas": "BlockException.INCORRECT_EXCESS_BLOB_GAS",
+        "InvalidTimestamp": "BlockException.INVALID_BLOCK_TIMESTAMP_OLDER_THAN_PARENT",
+        # Transaction exceptions (2 cases)
+        "NonceTooLow": "TransactionException.NONCE_MISMATCH_TOO_LOW",
+        "InsufficientFunds": "TransactionException.INSUFFICIENT_ACCOUNT_FUNDS",
+    }
+
+    return goevmlab_to_eest.get(value, value)
+
+
+GoevmlabExceptionValidator = BeforeValidator(normalize_goevmlab_exception)
+"""Pydantic BeforeValidator that normalizes goevmlab exception names to EEST format."""
+
+
 class InvalidBlockInput(BaseModel):
     """
     Invalid block data from fuzzer output v3.0.
@@ -185,7 +239,7 @@ class InvalidBlockInput(BaseModel):
     number: HexNumber = Field(..., alias="number")
 
     # Expected exception (REQUIRED - marks block as invalid)
-    expect_exception: str = Field(
+    expect_exception: Annotated[str, GoevmlabExceptionValidator] = Field(
         ...,
         alias="expectException",
         description="Expected exception when client rejects block",

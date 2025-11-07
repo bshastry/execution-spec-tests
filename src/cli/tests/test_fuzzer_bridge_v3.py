@@ -529,6 +529,92 @@ class TestInvalidBlockSupport:
             block = InvalidBlockInput(**block_data)
             assert block.expect_exception == exception
 
+    def test_goevmlab_exception_normalization(self):
+        """Test BeforeValidator normalizes all goevmlab exception names."""
+        # Test all 8 known goevmlab exception names
+        goevmlab_mappings = [
+            # Block exceptions
+            ("InvalidGasLimit", "BlockException.INVALID_GASLIMIT"),
+            ("InvalidBaseFee", "BlockException.INVALID_BASEFEE_PER_GAS"),
+            ("InvalidBlobGas", "BlockException.INCORRECT_BLOB_GAS_USED"),
+            ("InvalidBlockNumber", "BlockException.INVALID_BLOCK_NUMBER"),
+            ("InvalidExcessBlobGas", "BlockException.INCORRECT_EXCESS_BLOB_GAS"),
+            ("InvalidTimestamp", "BlockException.INVALID_BLOCK_TIMESTAMP_OLDER_THAN_PARENT"),
+            # Transaction exceptions
+            ("NonceTooLow", "TransactionException.NONCE_MISMATCH_TOO_LOW"),
+            ("InsufficientFunds", "TransactionException.INSUFFICIENT_ACCOUNT_FUNDS"),
+        ]
+
+        for goevmlab_input, expected_eest in goevmlab_mappings:
+            block = InvalidBlockInput(
+                number="0x1",
+                expectException=goevmlab_input,
+            )
+            assert block.expect_exception == expected_eest, (
+                f"Failed to normalize {goevmlab_input} to {expected_eest}, "
+                f"got {block.expect_exception}"
+            )
+
+    def test_eest_format_exception_passthrough(self):
+        """Test that already-normalized EEST format exceptions pass through unchanged."""
+        eest_exceptions = [
+            "BlockException.INVALID_STATE_ROOT",
+            "BlockException.INVALID_GASLIMIT",
+            "TransactionException.INSUFFICIENT_ACCOUNT_FUNDS",
+            "TransactionException.NONCE_MISMATCH_TOO_LOW",
+        ]
+
+        for eest_format in eest_exceptions:
+            block = InvalidBlockInput(
+                number="0x1",
+                expectException=eest_format,
+            )
+            assert block.expect_exception == eest_format, (
+                f"EEST format {eest_format} should pass through unchanged, "
+                f"got {block.expect_exception}"
+            )
+
+    def test_mixed_goevmlab_eest_blocks(self):
+        """Test FuzzerOutput with mixed goevmlab and EEST exception formats."""
+        fuzzer_data = {
+            "version": "3.0",
+            "fork": "Prague",
+            "chainId": "0x1",
+            "accounts": {
+                "0x1000000000000000000000000000000000000000": {
+                    "balance": "0xde0b6b3a7640000",
+                    "nonce": "0x0",
+                }
+            },
+            "blocks": [
+                {
+                    "number": "0x1",
+                    "timestamp": "0x3e8",
+                    "gasLimit": "0x1c9c380",
+                    "coinbase": "0x2adc25665018aa1fe0e6bc666dac8fc2697ff9ba",
+                    "transactions": [],
+                },
+                # Goevmlab format
+                {"number": "0x2", "expectException": "InvalidGasLimit"},
+                # EEST format
+                {"number": "0x3", "expectException": "BlockException.INVALID_STATE_ROOT"},
+                # Goevmlab format
+                {"number": "0x4", "expectException": "NonceTooLow"},
+            ],
+        }
+
+        fuzzer_output = FuzzerOutput(**fuzzer_data)
+        assert isinstance(fuzzer_output.blocks[0], ValidBlockInput)
+        assert isinstance(fuzzer_output.blocks[1], InvalidBlockInput)
+        assert fuzzer_output.blocks[1].expect_exception == "BlockException.INVALID_GASLIMIT"
+        assert isinstance(fuzzer_output.blocks[2], InvalidBlockInput)
+        assert fuzzer_output.blocks[2].expect_exception == "BlockException.INVALID_STATE_ROOT"
+        assert isinstance(fuzzer_output.blocks[3], InvalidBlockInput)
+        assert (
+            fuzzer_output.blocks[3].expect_exception
+            == "TransactionException.NONCE_MISMATCH_TOO_LOW"
+        )
+
 
 class TestInvalidBlockConverter:
     """Test converter handles invalid blocks correctly."""
@@ -572,7 +658,9 @@ class TestInvalidBlockConverter:
                 "0xa94f5374fce5edbc8e2a8697c15331677e6ebf0b": {
                     "balance": "0xde0b6b3a7640000",
                     "nonce": "0x0",
-                    "privateKey": "0x45a915e4d060149eb4365960e6a7a45f334393093061116b197e3240065ff2d8",
+                    "privateKey": (
+                        "0x45a915e4d060149eb4365960e6a7a45f334393093061116b197e3240065ff2d8"
+                    ),
                 }
             },
             "blocks": [
@@ -607,7 +695,10 @@ class TestInvalidBlockConverter:
         # Block 1: invalid
         from ethereum_test_exceptions import BlockException
 
-        assert blockchain_test.blocks[1].exception == BlockException.INVALID_BLOCK_TIMESTAMP_OLDER_THAN_PARENT
+        assert (
+            blockchain_test.blocks[1].exception
+            == BlockException.INVALID_BLOCK_TIMESTAMP_OLDER_THAN_PARENT
+        )
         # Block 2: valid
         assert blockchain_test.blocks[2].exception is None
 
