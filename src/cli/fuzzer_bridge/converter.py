@@ -36,7 +36,7 @@ Migration Guide:
        result = processor.process(fuzzer_output, t8n=t8n, fork=fork)
 """
 
-from typing import Dict
+from typing import Dict, List
 
 from ethereum_test_base_types import Address, Hash, HexNumber
 from ethereum_test_exceptions import BlockException, TransactionException
@@ -49,6 +49,7 @@ from ethereum_test_types.account_types import EOA
 from .models import (
     FuzzerAccountInput,
     FuzzerAuthorizationInput,
+    FuzzerGenesisInput,
     FuzzerOutput,
     FuzzerTransactionInput,
     InvalidBlockInput,
@@ -56,23 +57,105 @@ from .models import (
 )
 
 
-def parse_exception_string(exception_str: str) -> BlockException | TransactionException:
+def _is_transaction_level_exception(exception: BlockException | TransactionException) -> bool:
     """
-    Parse exception string from fuzzer format to EEST exception type.
+    Determine if exception is transaction-level (causes state contamination).
+
+    Transaction-level exceptions occur during transaction execution and can cause
+    partial state updates (e.g., txs 0-11 succeed, tx 12 fails). To prevent state
+    contamination, blocks with these exceptions should have empty transaction lists.
+
+    Block-level exceptions occur during header validation and require transactions
+    to be present for proper validation.
+
+    Returns:
+        True if exception is transaction-level (should create empty block)
+        False if exception is block-level or RLP-level (preserve transactions)
+    """
+    # All BlockException are block-level
+    if isinstance(exception, BlockException):
+        return False
+
+    # TransactionException: categorize by type
+    if isinstance(exception, TransactionException):
+        # RLP exceptions don't cause state contamination (pre-execution parsing errors)
+        RLP_EXCEPTIONS = {
+            TransactionException.RLP_ERROR_EOF,
+            TransactionException.RLP_ERROR_SIZE,
+            TransactionException.RLP_ERROR_SIZE_LEADING_ZEROS,
+            TransactionException.RLP_INVALID_ACCESS_LIST_ADDRESS_TOO_LONG,
+            TransactionException.RLP_INVALID_ACCESS_LIST_ADDRESS_TOO_SHORT,
+            TransactionException.RLP_INVALID_ACCESS_LIST_STORAGE_TOO_LONG,
+            TransactionException.RLP_INVALID_ACCESS_LIST_STORAGE_TOO_SHORT,
+            TransactionException.RLP_INVALID_DATA,
+            TransactionException.RLP_INVALID_GASLIMIT,
+            TransactionException.RLP_INVALID_HEADER,
+            TransactionException.RLP_INVALID_NONCE,
+            TransactionException.RLP_INVALID_SIGNATURE_R,
+            TransactionException.RLP_INVALID_SIGNATURE_S,
+            TransactionException.RLP_INVALID_TO,
+            TransactionException.RLP_INVALID_VALUE,
+            TransactionException.RLP_LEADING_ZEROS_BASEFEE,
+            TransactionException.RLP_LEADING_ZEROS_DATA_SIZE,
+            TransactionException.RLP_LEADING_ZEROS_GASLIMIT,
+            TransactionException.RLP_LEADING_ZEROS_GASPRICE,
+            TransactionException.RLP_LEADING_ZEROS_NONCE,
+            TransactionException.RLP_LEADING_ZEROS_NONCE_SIZE,
+            TransactionException.RLP_LEADING_ZEROS_PRIORITY_FEE,
+            TransactionException.RLP_LEADING_ZEROS_R,
+            TransactionException.RLP_LEADING_ZEROS_S,
+            TransactionException.RLP_LEADING_ZEROS_V,
+            TransactionException.RLP_LEADING_ZEROS_VALUE,
+            TransactionException.RLP_TOO_FEW_ELEMENTS,
+            TransactionException.RLP_TOO_MANY_ELEMENTS,
+        }
+
+        # Transaction-level exceptions (execution-time, can contaminate state)
+        return exception not in RLP_EXCEPTIONS
+
+    return False
+
+
+def parse_exception_string(
+    exception_str: str | List[str],
+) -> BlockException | TransactionException | List[BlockException | TransactionException]:
+    """
+    Parse exception string(s) from fuzzer format to EEST exception type(s).
+
+    Supports:
+    - Single: "BlockException.INVALID_STATE_ROOT"
+    - Pipe-separated: "BlockException.INVALID_STATE_ROOT|BlockException.UNKNOWN_PARENT"
+    - List: ["BlockException.INVALID_STATE_ROOT", "BlockException.UNKNOWN_PARENT"]
 
     Args:
-        exception_str: Exception string in fuzzer format, e.g.:
+        exception_str: Exception string(s) in fuzzer format, e.g.:
                       - "BlockException.INVALID_STATE_ROOT"
                       - "TransactionException.NONCE_TOO_LOW"
                       - "INVALID_TIMESTAMP" (legacy format)
+                      - "BlockException.INVALID_STATE_ROOT|BlockException.UNKNOWN_PARENT" (multiple)
+                      - ["BlockException.INVALID_STATE_ROOT", "BlockException.UNKNOWN_PARENT"] (list)
 
     Returns:
-        BlockException or TransactionException instance
+        Single exception or list of exceptions (depending on input)
 
     Raises:
         ValueError: If exception string cannot be parsed
 
     """
+    # Handle list input
+    if isinstance(exception_str, list):
+        if len(exception_str) == 1:
+            return parse_exception_string(exception_str[0])
+        return [parse_exception_string(exc) for exc in exception_str]
+
+    # Handle pipe-separated string
+    if "|" in exception_str:
+        exceptions = exception_str.split("|")
+        if len(exceptions) == 1:
+            return parse_exception_string(exceptions[0])
+        return [parse_exception_string(exc.strip()) for exc in exceptions]
+
+    # Single exception parsing - original logic
     # Split on dot to check if it has prefix
     parts = exception_str.split(".")
 
@@ -486,70 +569,27 @@ def _validate_withdrawal_indices(blocks: list) -> None:
             expected_next += 1
 
 
-def _validate_genesis_timestamp(first_block) -> None:
-    """
-    Validate first block timestamp allows valid genesis.
-
-    From validation report Section 5.3: genesis timestamp = first_block - 12,
-    so first block must be >= 12.
-
-    Note: Invalid blocks don't have timestamp field, so this check is skipped.
-    """
-    # Skip validation for invalid blocks (they don't have timestamp)
-    if isinstance(first_block, InvalidBlockInput):
-        return
-
-    if int(first_block.timestamp) < 12:
-        raise ValueError(
-            f"First block timestamp {first_block.timestamp} must be >= 12 "
-            "(genesis = timestamp - 12)"
-        )
-
-
-def _derive_genesis_from_first_block_v3(
-    first_block,
+def _build_genesis_from_v3(
+    genesis: FuzzerGenesisInput,
     fork: Fork,
 ) -> Environment:
     """
-    Derive genesis environment from first block in v3.0 format.
+    Build genesis environment from explicit v3.0 genesis field.
 
     Args:
-        first_block: First block from v3.0 blocks array
+        genesis: Genesis parameters from v3.0 format
         fork: Fork to use
 
     Returns:
         Genesis environment (block 0)
-
-    Note:
-        If first block is invalid, returns default genesis environment.
     """
-    # If first block is invalid, use default genesis
-    if isinstance(first_block, InvalidBlockInput):
-        return Environment(
-            fee_recipient=Address("0x2adc25665018aa1fe0e6bc666dac8fc2697ff9ba"),
-            difficulty=0,
-            gas_limit=30_000_000,
-            number=0,
-            timestamp=0,
-            prev_randao=Hash(0),
-        ).set_fork_requirements(fork)
-
-    # Validate first block allows valid genesis
-    _validate_genesis_timestamp(first_block)
-
-    # Genesis is block N-1 of first block
-    genesis_timestamp = HexNumber(int(first_block.timestamp) - 12)
-
     return Environment(
-        fee_recipient=first_block.coinbase,
-        difficulty=0,  # Post-merge
-        gas_limit=int(first_block.gas_limit),
-        number=0,  # Genesis is always block 0
-        timestamp=genesis_timestamp,
-        prev_randao=first_block.mix_hash or Hash(0),
-        base_fee_per_gas=first_block.base_fee_per_gas if first_block.base_fee_per_gas else None,
-        excess_blob_gas=first_block.excess_blob_gas if first_block.excess_blob_gas else None,
-        blob_gas_used=first_block.blob_gas_used if first_block.blob_gas_used else None,
+        fee_recipient=Address("0x2adc25665018aa1fe0e6bc666dac8fc2697ff9ba"),
+        difficulty=0,
+        gas_limit=int(genesis.gas_limit),
+        number=0,
+        timestamp=int(genesis.timestamp),
+        prev_randao=Hash(0),
     ).set_fork_requirements(fork)
 
 
@@ -574,13 +614,41 @@ def _convert_block_v3(
     """
     # Check if this is an invalid block
     if isinstance(fuzzer_block, InvalidBlockInput):
-        # Invalid block: minimal conversion with exception
+        # Invalid block: parse exception first
         exception = parse_exception_string(fuzzer_block.expect_exception)
 
+        # ALL invalid blocks with structured format should use empty transaction lists.
+        # Reason: Goevmlab creates invalid blocks by either:
+        # 1. Transaction-level exceptions: Injecting invalid transactions (e.g., duplicate nonce)
+        #    → Causes partial state contamination when some txs succeed before one fails
+        # 2. Block-level exceptions: Mutating header fields (e.g., baseFee, gasLimit, timestamp)
+        #    → Makes transactions unexecutable with mutated parameters
+        #
+        # In both cases, attempting to execute transactions through t8n causes failures.
+        # Empty blocks allow proper invalid block testing without execution issues.
+        if fuzzer_block.block is not None:
+            return Block(
+                number=fuzzer_block.block.number,
+                timestamp=fuzzer_block.block.timestamp,
+                gas_limit=fuzzer_block.block.gas_limit,
+                coinbase=fuzzer_block.block.coinbase,
+                base_fee_per_gas=fuzzer_block.block.base_fee_per_gas,
+                difficulty=fuzzer_block.block.difficulty,
+                mix_hash=fuzzer_block.block.mix_hash,
+                excess_blob_gas=fuzzer_block.block.excess_blob_gas,
+                blob_gas_used=fuzzer_block.block.blob_gas_used,
+                parent_beacon_block_root=fuzzer_block.block.parent_beacon_block_root,
+                extra_data=fuzzer_block.block.extra_data,
+                txs=[],  # CRITICAL: Empty transactions to prevent execution issues
+                exception=exception,
+                skip_exception_verification=True,
+            )
+
+        # RLP-only format (legacy): minimal conversion without transaction execution
+        # Note: RLP will be handled during fixture generation
         return Block(
             number=fuzzer_block.number,
             exception=exception,
-            # Note: RLP field is not supported in Block type - it's added during fixture generation
         )
 
     # Valid block: full conversion (existing logic)
@@ -681,8 +749,8 @@ def blockchain_test_from_fuzzer_v3(
         block = _convert_block_v3(fuzzer_block, sender_eoa_map)
         blocks.append(block)
 
-    # Step 5: Derive genesis from first block (Section 5.3)
-    genesis_env = _derive_genesis_from_first_block_v3(fuzzer_output.blocks[0], fork)
+    # Step 5: Build genesis from explicit genesis field
+    genesis_env = _build_genesis_from_v3(fuzzer_output.genesis, fork)
 
     # Step 6: Build BlockchainTest
     return BlockchainTest(

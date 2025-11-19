@@ -155,9 +155,20 @@ class Environment(EnvironmentGeneric[ZeroPaddedHexNumber]):
         if (
             fork.header_base_fee_required(block_number=number, timestamp=timestamp)
             and self.base_fee_per_gas is None
-            and self.parent_base_fee_per_gas is None
         ):
-            updated_values["base_fee_per_gas"] = DEFAULT_BASE_FEE
+            if self.parent_base_fee_per_gas is not None:
+                # Calculate from parent using EIP-1559 formula
+                calculator = fork.base_fee_per_gas_calculator(
+                    block_number=number, timestamp=timestamp
+                )
+                updated_values["base_fee_per_gas"] = calculator(
+                    parent_base_fee_per_gas=int(self.parent_base_fee_per_gas),
+                    parent_gas_used=int(self.parent_gas_used or 0),
+                    parent_gas_limit=int(self.parent_gas_limit or self.gas_limit),
+                )
+            else:
+                # No parent info available, use default
+                updated_values["base_fee_per_gas"] = DEFAULT_BASE_FEE
 
         if fork.header_zero_difficulty_required(block_number=number, timestamp=timestamp):
             updated_values["difficulty"] = 0

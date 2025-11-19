@@ -252,7 +252,7 @@ class Block(Header):
         new_env_values["gas_limit"] = (
             self.gas_limit or env.parent_gas_limit or Environment().gas_limit
         )
-        if not isinstance(self.base_fee_per_gas, Removable):
+        if not isinstance(self.base_fee_per_gas, Removable) and self.base_fee_per_gas is not None:
             new_env_values["base_fee_per_gas"] = self.base_fee_per_gas
         new_env_values["withdrawals"] = self.withdrawals
         if not isinstance(self.excess_blob_gas, Removable):

@@ -226,26 +226,38 @@ class InvalidBlockInput(BaseModel):
     Invalid block data from fuzzer output v3.0.
 
     Represents a block that violates consensus rules and is expected
-    to be rejected by the client. Contains minimal structure:
-    - number: Block number for ordering
-    - expectException: Expected exception when client rejects block
-    - rlp: Optional RLP-encoded block for direct client testing
+    to be rejected by the client.
 
-    Invalid blocks test the "rejection path" - ensuring clients
-    correctly reject blocks that violate consensus rules.
+    Two formats supported:
+    1. Structured format (PRIMARY): Contains block field with ValidBlockInput structure
+       - Allows EEST to run t8n and compute correct state roots
+       - Used for field-level validation tests (timestamp, gasLimit, etc.)
+    2. RLP format (LEGACY): Contains rlp field with pre-encoded bytes
+       - Used only for RLP-corruption tests
+
+    Exactly one of `block` or `rlp` must be present.
     """
 
     # Block number (REQUIRED for ordering)
     number: HexNumber = Field(..., alias="number")
 
     # Expected exception (REQUIRED - marks block as invalid)
-    expect_exception: Annotated[str, GoevmlabExceptionValidator] = Field(
+    # Supports single string or pipe-separated list: "Exception1|Exception2"
+    expect_exception: Annotated[str | List[str], GoevmlabExceptionValidator] = Field(
         ...,
         alias="expectException",
-        description="Expected exception when client rejects block",
+        description="Expected exception(s) when client rejects block. "
+        "Pipe-separated for multiple: 'BlockException.EXC1|BlockException.EXC2'",
     )
 
-    # Optional RLP-encoded block
+    # Structured block data (PRIMARY format for field-level mutations)
+    block: "ValidBlockInput | None" = Field(
+        None,
+        alias="block",
+        description="Structured V3Block data for field-level validation tests",
+    )
+
+    # Optional RLP-encoded block (LEGACY format for RLP corruption)
     rlp: Bytes | None = Field(
         None,
         alias="rlp",
@@ -256,13 +268,28 @@ class InvalidBlockInput(BaseModel):
         """Pydantic configuration."""
 
         populate_by_name = True
-        extra = "forbid"  # Reject extra fields like transactions, timestamp
+        # Allow block field now (removed extra = "forbid")
 
     @model_validator(mode="after")
     def validate_exception_format(self) -> "InvalidBlockInput":
-        """Validate expectException is not empty."""
+        """Validate expectException is not empty and block/rlp exclusivity."""
         if not self.expect_exception:
             raise ValueError("expectException cannot be empty")
+
+        # Handle list validation
+        if isinstance(self.expect_exception, list):
+            if not self.expect_exception:
+                raise ValueError("expectException list cannot be empty")
+            for exc in self.expect_exception:
+                if not exc or (isinstance(exc, str) and not exc.strip()):
+                    raise ValueError("expectException list items cannot be empty")
+
+        # Exactly one of block or rlp must be set
+        if self.block is None and self.rlp is None:
+            raise ValueError("Invalid block must have either 'block' or 'rlp' field")
+        if self.block is not None and self.rlp is not None:
+            raise ValueError("Invalid block cannot have both 'block' and 'rlp' fields")
+
         return self
 
 
@@ -275,6 +302,22 @@ BlockInput = Annotated[
 
 # Backward compatibility alias
 FuzzerBlockInput = ValidBlockInput
+
+
+class FuzzerGenesisInput(BaseModel):
+    """
+    Genesis parameters from fuzzer output v3.0.
+
+    Provides explicit genesis values instead of deriving from first block.
+    """
+
+    gas_limit: HexNumber = Field(..., alias="gasLimit")
+    timestamp: HexNumber = Field(..., alias="timestamp")
+
+    class Config:
+        """Pydantic configuration."""
+
+        populate_by_name = True
 
 
 class FuzzerOutput(CamelModel):
@@ -305,6 +348,7 @@ class FuzzerOutput(CamelModel):
 
     # v3.0 fields (not supported in v2.0)
     blocks: List[BlockInput] | None = None
+    genesis: FuzzerGenesisInput | None = None
 
     @model_validator(mode="after")
     def validate_version_fields(self) -> "FuzzerOutput":
@@ -321,13 +365,15 @@ class FuzzerOutput(CamelModel):
                 raise ValueError("v2.0 format cannot have 'blocks' field")
 
         elif self.version == "3.0":
-            # v3.0: Must have blocks, no flat transactions/env
+            # v3.0: Must have blocks + genesis, no flat transactions/env
             if not config.enable_v3_format:
                 raise ValueError(
                     "v3.0 format not enabled. Set FUZZER_BRIDGE_V3=true to enable."
                 )
             if self.blocks is None:
                 raise ValueError("v3.0 format requires 'blocks' field")
+            if self.genesis is None:
+                raise ValueError("v3.0 format requires 'genesis' field")
             if self.transactions is not None:
                 raise ValueError("v3.0 format cannot have 'transactions' field")
             if self.env is not None:

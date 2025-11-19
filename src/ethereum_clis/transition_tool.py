@@ -521,7 +521,8 @@ class TransitionTool(EthereumCLI):
             raise ValueError(f"Invalid chain ID: {chain_id}")
 
         # Validate reward (should be non-negative integer)
-        if not isinstance(reward, int) or reward < 0:
+        # Special case: -1 is used as sentinel for block 0 (set by __post_init__)
+        if not isinstance(reward, int) or (reward < 0 and reward != -1):
             raise ValueError(f"Invalid reward: {reward}")
 
         # Use literal strings for command flags
